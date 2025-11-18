@@ -239,7 +239,7 @@ func processEvent(evt *wechatEvent) error {
 	}
 
 	session.Status = sessionStatusOK
-	session.Scene = user.Nickname
+	session.Scene = user.remark
 	session.OpenID = evt.FromUserName
 	loginSessions.Store(scene, session)
 	return nil
@@ -252,19 +252,19 @@ func normalizeScene(eventKey string) string {
 	return strings.TrimPrefix(eventKey, "qrscene_")
 }
 
-func fetchSubscribeInfo(openID string) (*UserResponse, error) {
+func fetchSubscribeInfo(openID string) (*SubResponse, error) {
 	token, err := getGlobalAccessToken()
 	if err != nil {
 		return nil, err
 	}
 
 	infoURL := fmt.Sprintf(
-		"https://api.weixin.qq.com/sns/userinfo?access_token=%s&openid=%s&lang=zh_CN",
+		"https://api.weixin.qq.com/cgi-bin/user/info?access_token=%s&openid=%s&lang=zh_CN",
 		url.QueryEscape(token),
 		url.QueryEscape(openID),
 	)
 
-	var resp UserResponse
+	var resp SubResponse
 	if err := getJSON(infoURL, &resp); err != nil {
 		return nil, err
 	}
@@ -409,13 +409,11 @@ type qrCodeResponse struct {
 	ErrMsg        string `json:"errmsg"`
 }
 
-type UserResponse struct {
-	OpenID     string `json:"openid"`
-	Nickname   string `json:"nickname"`
-	Sex        string `json:"sex"`
-	HeadImgUrl string `json:"headimgurl"`
-	ErrCode    int    `json:"errcode"`
-	ErrMsg     string `json:"errmsg"`
+type SubResponse struct {
+	OpenID  string `json:"openid"`
+	remark  string `json:"remark"`
+	ErrCode int    `json:"errcode"`
+	ErrMsg  string `json:"errmsg"`
 }
 
 type globalTokenResponse struct {
