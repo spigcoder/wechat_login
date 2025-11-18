@@ -20,8 +20,7 @@ export WECHAT_SERVICE_APP_ID=服务号AppID
 export WECHAT_SERVICE_APP_SECRET=服务号AppSecret
 export WECHAT_SERVICE_TOKEN=公众平台配置的 Token
 export PORT=8080 # 可选
-
-GOCACHE=$(pwd)/.cache go run ./service
+go run ./service
 ```
 
 浏览器访问 `http://localhost:8080/` 即可打开示例前端页面，生成二维码并实时显示登录状态。

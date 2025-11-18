@@ -36,7 +36,7 @@ var (
 	token         = os.Getenv("WECHAT_TOKEN")
 	listenAddr    = ":" + envOrDefault("PORT", "8080")
 	httpClient    = &http.Client{Timeout: 10 * time.Second}
-	errMissingEnv = errors.New("请设置 WECHAT_SERVICE_APP_ID、WECHAT_SERVICE_APP_SECRET 与 WECHAT_SERVICE_TOKEN 环境变量")
+	errMissingEnv = errors.New("请设置 WECHAT_APP_ID、WECHAT_APP_SECRET 与 WECHAT_TOKEN 环境变量")
 
 	globalTokenMu      sync.RWMutex
 	globalToken        string
@@ -237,6 +237,9 @@ func processEvent(evt *wechatEvent) error {
 	if err != nil {
 		return err
 	}
+	if user.Subscribe != 1 {
+		return fmt.Errorf("用户尚未关注")
+	}
 
 	session.Status = sessionStatusOK
 	session.Scene = user.remark
@@ -410,10 +413,11 @@ type qrCodeResponse struct {
 }
 
 type SubResponse struct {
-	OpenID  string `json:"openid"`
-	remark  string `json:"remark"`
-	ErrCode int    `json:"errcode"`
-	ErrMsg  string `json:"errmsg"`
+	Subscribe int    `json:"subscribe"`
+	OpenID    string `json:"openid"`
+	remark    string `json:"remark"`
+	ErrCode   int    `json:"errcode"`
+	ErrMsg    string `json:"errmsg"`
 }
 
 type globalTokenResponse struct {
