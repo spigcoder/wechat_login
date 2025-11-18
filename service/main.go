@@ -1,156 +1,265 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
+	"crypto/sha1"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	stateCookieName = "wechat_service_login_state"
-	stateLength     = 24
+	stateLength      = 24
+	sessionStatusNew = "pending"
+	sessionStatusOK  = "subscribed"
+	qrExpireSeconds  = 300
 )
 
 var (
-	appID              = os.Getenv("WECHAT_SERVICE_APP_ID")
-	appSecret          = os.Getenv("WECHAT_SERVICE_APP_SECRET")
-	callbackURL        = os.Getenv("WECHAT_SERVICE_CALLBACK_URL")
-	listenAddr         = ":" + envOrDefault("PORT", "8080")
-	httpClient         = &http.Client{Timeout: 10 * time.Second}
-	errMissingEnv      = errors.New("请设置 WECHAT_SERVICE_APP_ID、WECHAT_SERVICE_APP_SECRET 与 WECHAT_SERVICE_CALLBACK_URL 环境变量")
+	appID         = os.Getenv("WECHAT_SERVICE_APP_ID")
+	appSecret     = os.Getenv("WECHAT_SERVICE_APP_SECRET")
+	token         = os.Getenv("WECHAT_SERVICE_TOKEN")
+	listenAddr    = ":" + envOrDefault("PORT", "8080")
+	httpClient    = &http.Client{Timeout: 10 * time.Second}
+	errMissingEnv = errors.New("请设置 WECHAT_SERVICE_APP_ID、WECHAT_SERVICE_APP_SECRET 与 WECHAT_SERVICE_TOKEN 环境变量")
+
 	globalTokenMu      sync.RWMutex
 	globalToken        string
 	globalTokenExpires time.Time
+
+	loginSessions sync.Map // map[string]*loginSession
 )
 
+type loginSession struct {
+	Scene     string    `json:"scene"`
+	QRCodeURL string    `json:"qrcode_url"`
+	Status    string    `json:"status"`
+	OpenID    string    `json:"openid,omitempty"`
+	Nickname  string    `json:"nickname,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
 func main() {
-	if appID == "" || appSecret == "" || callbackURL == "" {
+	if appID == "" || appSecret == "" || token == "" {
 		log.Fatal(errMissingEnv)
 	}
 
-	http.HandleFunc("/", handleLoginRedirect)
-	http.HandleFunc("/wechat/callback", handleCallback)
+	http.HandleFunc("/", handleIndex)
+	http.HandleFunc("/session/new", handleCreateSession)
+	http.HandleFunc("/session/", handleSessionStatus)
+	http.HandleFunc("/wechat/message", handleMessage)
 
-	log.Printf("微信服务号关注登录示例已启动，监听 %s", listenAddr)
+	go cleanupExpiredSessions()
+
+	log.Printf("服务号扫码关注登录示例启动，监听 %s", listenAddr)
 	if err := http.ListenAndServe(listenAddr, nil); err != nil {
 		log.Fatalf("服务器启动失败: %v", err)
 	}
 }
 
-func handleLoginRedirect(w http.ResponseWriter, r *http.Request) {
-	state, err := generateState()
-	if err != nil {
-		http.Error(w, "生成状态失败", http.StatusInternalServerError)
-		return
-	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     stateCookieName,
-		Value:    state,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   r.TLS != nil,
-		MaxAge:   300,
-	})
-
-	authURL := fmt.Sprintf(
-		"https://open.weixin.qq.com/connect/oauth2/authorize?appid=%s&redirect_uri=%s&response_type=code&scope=snsapi_userinfo&state=%s#wechat_redirect",
-		url.QueryEscape(appID),
-		url.QueryEscape(callbackURL),
-		url.QueryEscape(state),
-	)
-
-	http.Redirect(w, r, authURL, http.StatusFound)
-}
-
-func handleCallback(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query()
-	code := query.Get("code")
-	state := query.Get("state")
-	if code == "" || state == "" {
-		http.Error(w, "缺少必要参数", http.StatusBadRequest)
-		return
-	}
-
-	if !validateState(r, state) {
-		http.Error(w, "state 无效", http.StatusBadRequest)
-		return
-	}
-
-	token, err := fetchOAuthAccessToken(code)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("获取 access_token 失败: %v", err), http.StatusBadGateway)
-		return
-	}
-
-	user, err := fetchOAuthUser(token)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("获取用户信息失败: %v", err), http.StatusBadGateway)
-		return
-	}
-
-	subscribed, err := ensureSubscription(user.OpenID)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("查询关注状态失败: %v", err), http.StatusBadGateway)
-		return
-	}
-	if !subscribed {
-		http.Error(w, "请先关注服务号后再登录", http.StatusForbidden)
-		return
-	}
-
-	response := fmt.Sprintf("hello_service，欢迎 %s (openid: %s)", user.Nickname, user.OpenID)
+func handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = w.Write([]byte(response))
+	fmt.Fprintf(w, "调用 /session/new 获取二维码信息，轮询 /session/{scene} 查看关注状态。微信服务器回调地址请配置为 /wechat/message。")
 }
 
-func fetchOAuthAccessToken(code string) (*oauthTokenResponse, error) {
-	tokenURL := fmt.Sprintf(
-		"https://api.weixin.qq.com/sns/oauth2/access_token?appid=%s&secret=%s&code=%s&grant_type=authorization_code",
-		url.QueryEscape(appID),
-		url.QueryEscape(appSecret),
-		url.QueryEscape(code),
-	)
+func handleCreateSession(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		http.Error(w, "仅支持 GET/POST", http.StatusMethodNotAllowed)
+		return
+	}
 
-	var resp oauthTokenResponse
-	if err := getJSON(tokenURL, &resp); err != nil {
+	sess, err := createLoginSession()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("创建扫码会话失败: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	writeJSON(w, sess)
+}
+
+func handleSessionStatus(w http.ResponseWriter, r *http.Request) {
+	scene := strings.TrimPrefix(r.URL.Path, "/session/")
+	if scene == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	value, ok := loginSessions.Load(scene)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	writeJSON(w, value)
+}
+
+func handleMessage(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	if !validateSignature(query) {
+		http.Error(w, "签名校验失败", http.StatusForbidden)
+		return
+	}
+
+	if r.Method == http.MethodGet {
+		_, _ = w.Write([]byte(query.Get("echostr")))
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "读取请求失败", http.StatusInternalServerError)
+		return
+	}
+	defer r.Body.Close()
+
+	var evt wechatEvent
+	if err := xml.Unmarshal(body, &evt); err != nil {
+		http.Error(w, "解析事件失败", http.StatusBadRequest)
+		return
+	}
+
+	if err := processEvent(&evt); err != nil {
+		log.Printf("处理事件失败: %v", err)
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte("success"))
+}
+
+func createLoginSession() (*loginSession, error) {
+	scene, err := generateState()
+	if err != nil {
 		return nil, err
 	}
-	if resp.ErrCode != 0 {
-		return nil, fmt.Errorf("微信返回错误: %d %s", resp.ErrCode, resp.ErrMsg)
-	}
-	return &resp, nil
-}
 
-func fetchOAuthUser(token *oauthTokenResponse) (*oauthUserResponse, error) {
-	userURL := fmt.Sprintf(
-		"https://api.weixin.qq.com/sns/userinfo?access_token=%s&openid=%s&lang=zh_CN",
-		url.QueryEscape(token.AccessToken),
-		url.QueryEscape(token.OpenID),
-	)
-
-	var user oauthUserResponse
-	if err := getJSON(userURL, &user); err != nil {
+	qr, err := requestQRCode(scene)
+	if err != nil {
 		return nil, err
 	}
-	if user.ErrCode != 0 {
-		return nil, fmt.Errorf("微信返回错误: %d %s", user.ErrCode, user.ErrMsg)
+
+	session := &loginSession{
+		Scene:     scene,
+		QRCodeURL: fmt.Sprintf("https://mp.weixin.qq.com/cgi-bin/showqrcode?ticket=%s", url.QueryEscape(qr.Ticket)),
+		Status:    sessionStatusNew,
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(time.Duration(qr.ExpireSeconds) * time.Second),
 	}
-	return &user, nil
+	loginSessions.Store(scene, session)
+	return session, nil
 }
 
-func ensureSubscription(openID string) (bool, error) {
+func requestQRCode(scene string) (*qrCodeResponse, error) {
 	token, err := getGlobalAccessToken()
 	if err != nil {
-		return false, err
+		return nil, err
+	}
+
+	endpoint := fmt.Sprintf("https://api.weixin.qq.com/cgi-bin/qrcode/create?access_token=%s", url.QueryEscape(token))
+	payload := map[string]interface{}{
+		"expire_seconds": qrExpireSeconds,
+		"action_name":    "QR_STR_SCENE",
+		"action_info": map[string]interface{}{
+			"scene": map[string]string{
+				"scene_str": scene,
+			},
+		},
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("微信接口返回状态码 %d", resp.StatusCode)
+	}
+
+	var qr qrCodeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&qr); err != nil {
+		return nil, err
+	}
+	if qr.ErrCode != 0 {
+		return nil, fmt.Errorf("微信返回错误: %d %s", qr.ErrCode, qr.ErrMsg)
+	}
+	return &qr, nil
+}
+
+func processEvent(evt *wechatEvent) error {
+	if strings.ToLower(evt.MsgType) != "event" {
+		return nil
+	}
+	eventType := strings.ToLower(strings.TrimSpace(evt.Event))
+	if eventType != "subscribe" && eventType != "scan" {
+		return nil
+	}
+
+	scene := normalizeScene(evt.EventKey)
+	if scene == "" {
+		return errors.New("缺少 scene，无法匹配会话")
+	}
+
+	value, ok := loginSessions.Load(scene)
+	if !ok {
+		return fmt.Errorf("scene=%s 未找到会话", scene)
+	}
+
+	session, ok := value.(*loginSession)
+	if !ok {
+		loginSessions.Delete(scene)
+		return fmt.Errorf("会话数据异常: %s", scene)
+	}
+	user, err := fetchSubscribeInfo(evt.FromUserName)
+	if err != nil {
+		return err
+	}
+	if user.Subscribe != 1 {
+		return fmt.Errorf("用户 %s 尚未关注", evt.FromUserName)
+	}
+
+	session.Status = sessionStatusOK
+	session.OpenID = evt.FromUserName
+	session.Nickname = user.Nickname
+	loginSessions.Store(scene, session)
+	return nil
+}
+
+func normalizeScene(eventKey string) string {
+	if eventKey == "" {
+		return ""
+	}
+	return strings.TrimPrefix(eventKey, "qrscene_")
+}
+
+func fetchSubscribeInfo(openID string) (*subscribeResponse, error) {
+	token, err := getGlobalAccessToken()
+	if err != nil {
+		return nil, err
 	}
 
 	infoURL := fmt.Sprintf(
@@ -161,12 +270,27 @@ func ensureSubscription(openID string) (bool, error) {
 
 	var resp subscribeResponse
 	if err := getJSON(infoURL, &resp); err != nil {
-		return false, err
+		return nil, err
 	}
 	if resp.ErrCode != 0 {
-		return false, fmt.Errorf("微信返回错误: %d %s", resp.ErrCode, resp.ErrMsg)
+		return nil, fmt.Errorf("微信返回错误: %d %s", resp.ErrCode, resp.ErrMsg)
 	}
-	return resp.Subscribe == 1, nil
+	return &resp, nil
+}
+
+func validateSignature(values url.Values) bool {
+	signature := values.Get("signature")
+	timestamp := values.Get("timestamp")
+	nonce := values.Get("nonce")
+	if signature == "" || timestamp == "" || nonce == "" {
+		return false
+	}
+
+	parts := []string{token, timestamp, nonce}
+	sort.Strings(parts)
+
+	h := sha1.Sum([]byte(strings.Join(parts, "")))
+	return signature == hex.EncodeToString(h[:])
 }
 
 func getGlobalAccessToken() (string, error) {
@@ -184,11 +308,11 @@ func getGlobalAccessToken() (string, error) {
 		return globalToken, nil
 	}
 
-	token, expiresIn, err := fetchGlobalAccessToken()
+	tokenValue, expiresIn, err := fetchGlobalAccessToken()
 	if err != nil {
 		return "", err
 	}
-	globalToken = token
+	globalToken = tokenValue
 	globalTokenExpires = time.Now().Add(time.Duration(expiresIn-60) * time.Second)
 	return globalToken, nil
 }
@@ -227,11 +351,6 @@ func getJSON(endpoint string, dst interface{}) error {
 	return json.NewDecoder(resp.Body).Decode(dst)
 }
 
-func validateState(r *http.Request, state string) bool {
-	cookie, err := r.Cookie(stateCookieName)
-	return err == nil && cookie.Value == state
-}
-
 func generateState() (string, error) {
 	buf := make([]byte, stateLength)
 	if _, err := rand.Read(buf); err != nil {
@@ -247,48 +366,57 @@ func envOrDefault(key, def string) string {
 	return def
 }
 
-type oauthTokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	ExpiresIn    int    `json:"expires_in"`
-	RefreshToken string `json:"refresh_token"`
-	OpenID       string `json:"openid"`
-	Scope        string `json:"scope"`
-	ErrCode      int    `json:"errcode"`
-	ErrMsg       string `json:"errmsg"`
+func cleanupExpiredSessions() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		now := time.Now()
+		loginSessions.Range(func(key, value interface{}) bool {
+			session, ok := value.(*loginSession)
+			if !ok {
+				loginSessions.Delete(key)
+				return true
+			}
+			if now.After(session.ExpiresAt.Add(5 * time.Minute)) {
+				loginSessions.Delete(key)
+			}
+			return true
+		})
+	}
 }
 
-type oauthUserResponse struct {
-	OpenID     string   `json:"openid"`
-	Nickname   string   `json:"nickname"`
-	Sex        int      `json:"sex"`
-	Province   string   `json:"province"`
-	City       string   `json:"city"`
-	Country    string   `json:"country"`
-	HeadImgURL string   `json:"headimgurl"`
-	Privilege  []string `json:"privilege"`
-	UnionID    string   `json:"unionid"`
-	ErrCode    int      `json:"errcode"`
-	ErrMsg     string   `json:"errmsg"`
+type wechatEvent struct {
+	XMLName      xml.Name `xml:"xml"`
+	ToUserName   string   `xml:"ToUserName"`
+	FromUserName string   `xml:"FromUserName"`
+	CreateTime   int64    `xml:"CreateTime"`
+	MsgType      string   `xml:"MsgType"`
+	Event        string   `xml:"Event"`
+	EventKey     string   `xml:"EventKey"`
+	Ticket       string   `xml:"Ticket"`
+}
+
+type qrCodeResponse struct {
+	Ticket        string `json:"ticket"`
+	ExpireSeconds int    `json:"expire_seconds"`
+	URL           string `json:"url"`
+	ErrCode       int    `json:"errcode"`
+	ErrMsg        string `json:"errmsg"`
 }
 
 type subscribeResponse struct {
-	Subscribe   int    `json:"subscribe"`
-	OpenID      string `json:"openid"`
-	Nickname    string `json:"nickname"`
-	Sex         int    `json:"sex"`
-	City        string `json:"city"`
-	Country     string `json:"country"`
-	Province    string `json:"province"`
-	Language    string `json:"language"`
-	HeadImgURL  string `json:"headimgurl"`
-	SubscribeAt int64  `json:"subscribe_time"`
-	UnionID     string `json:"unionid"`
-	Remark      string `json:"remark"`
-	GroupID     int    `json:"groupid"`
-	TagIDList   []int  `json:"tagid_list"`
-	SubscribeSC int    `json:"subscribe_scene"`
-	ErrCode     int    `json:"errcode"`
-	ErrMsg      string `json:"errmsg"`
+	Subscribe int    `json:"subscribe"`
+	OpenID    string `json:"openid"`
+	Nickname  string `json:"nickname"`
+	Sex       int    `json:"sex"`
+	City      string `json:"city"`
+	Country   string `json:"country"`
+	Province  string `json:"province"`
+	Language  string `json:"language"`
+	HeadImg   string `json:"headimgurl"`
+	ErrCode   int    `json:"errcode"`
+	ErrMsg    string `json:"errmsg"`
 }
 
 type globalTokenResponse struct {
@@ -296,4 +424,11 @@ type globalTokenResponse struct {
 	ExpiresIn   int    `json:"expires_in"`
 	ErrCode     int    `json:"errcode"`
 	ErrMsg      string `json:"errmsg"`
+}
+
+func writeJSON(w http.ResponseWriter, v interface{}) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		http.Error(w, fmt.Sprintf("编码 JSON 失败: %v", err), http.StatusInternalServerError)
+	}
 }

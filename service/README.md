@@ -1,34 +1,44 @@
-# 微信服务号扫码关注登录
+# 微信服务号扫码关注登录（网页二维码）
 
-该示例演示用户扫描服务号二维码，完成 OAuth2 网页授权并确认已关注后才允许登录。
+该示例演示网页端自行生成服务号二维码，用户用微信客户端扫描后会跳转到服务号主页，关注成功后再允许网页端登录。
+
+## 流程概览
+
+1. 网页调用 `POST /session/new` 获取一次性登录会话，响应中包含 `scene` 与 `qrcode_url`。
+2. 前端把 `qrcode_url` 渲染成二维码图片。用户用手机微信扫描后会进入服务号。
+3. 若用户未关注，会在服务号主页完成关注；关注或扫码事件会通过 `/wechat/message` 回调到本服务。
+4. 服务器收到事件后，调用 `cgi-bin/user/info` 校验 `subscribe==1`，并把登录会话状态更新为 `subscribed`。
+5. 前端轮询 `GET /session/{scene}`，一旦状态变为 `subscribed` 即可创建业务登录态。
 
 ## 环境准备
 
-1. 使用已认证的微信服务号，记录 `AppID` 与 `AppSecret`，并在公众平台配置网页授权回调域名。
-2. 将服务域名解析到可公网访问的地址，保证 `https://example.com/wechat/callback` 等回调链接可被访问。
-3. 导出以下环境变量：
+1. 使用已认证的微信服务号，记录 `AppID`、`AppSecret`，并在公众平台**开发 > 基本配置**里设置服务器地址（指向 `/wechat/message`）和自定义 `Token`。
+2. 导出以下环境变量并启动服务：
 
 ```bash
-export WECHAT_SERVICE_APP_ID=你的服务号AppID
-export WECHAT_SERVICE_APP_SECRET=你的服务号AppSecret
-export WECHAT_SERVICE_CALLBACK_URL=https://example.com/wechat/callback
+export WECHAT_SERVICE_APP_ID=服务号AppID
+export WECHAT_SERVICE_APP_SECRET=服务号AppSecret
+export WECHAT_SERVICE_TOKEN=公众平台配置的 Token
 export PORT=8080 # 可选
-```
 
-## 运行方式
-
-```bash
 GOCACHE=$(pwd)/.cache go run ./service
 ```
 
-根路由 `/` 会生成 `state` 并跳转至 `https://open.weixin.qq.com/connect/oauth2/authorize` 的网页授权页面。用户扫码授权后，`/wechat/callback` 会先换取 OAuth `access_token` 与基础用户信息，再调用 `cgi-bin/user/info` 校验 `subscribe==1`，只有关注了服务号才返回欢迎信息。
+## 可用接口
 
-## 细节说明
+| 方法 | 路径 | 说明 |
+| ---- | ---- | ---- |
+| `POST /session/new` | 创建一次登录会话并返回二维码地址 |
+| `GET /session/{scene}` | 查询指定 `scene` 的登录状态（`pending` / `subscribed`） |
+| `GET/POST /wechat/message` | 供微信服务器验证及推送订阅事件，需在公众号后台配置 |
 
-- 全局 `access_token` 采用内存缓存，距离过期 60 秒内会自动刷新。
-- HTTP 请求均设置 10 秒超时，并显式检查 `errcode/errmsg` 方面的错误。
-- 若要将登录态写入自身系统，可在 `handleCallback` 中获取到 `user` 以及关注状态后执行后续逻辑。
+## 细节
+
+- 二维码通过 `cgi-bin/qrcode/create` 创建临时 `QR_STR_SCENE`，默认 300 秒过期。
+- 服务端内存缓存 `access_token` 并自动刷新，同时会定期清理过期会话。
+- `wechat/message` 仅处理 `subscribe` / `SCAN` 事件，其它事件会被忽略，回调响应固定 `success`。
+- 登录成功后 `GET /session/{scene}` 会返回 `openid`、`nickname`，可据此建立站点自身会话。
 
 参考文档：
-- [网页授权流程](https://developers.weixin.qq.com/doc/offiaccount/OA_Web_Apps/Wechat_webpage_authorization.html)
-- [获取用户基本信息](https://developers.weixin.qq.com/doc/offiaccount/User_Management/Get_users_basic_information_UnionID.html)
+- [生成带参数二维码](https://developers.weixin.qq.com/doc/offiaccount/Account_Management/Generating_a_Parametric_QR_Code.html)
+- [接收事件推送](https://developers.weixin.qq.com/doc/offiaccount/Message_Management/Receiving_event_pushes.html)
