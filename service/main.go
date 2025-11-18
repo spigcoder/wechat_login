@@ -237,12 +237,9 @@ func processEvent(evt *wechatEvent) error {
 	if err != nil {
 		return err
 	}
-	if user.Subscribe != 1 {
-		return fmt.Errorf("用户 %s 尚未关注", evt.FromUserName)
-	}
 
 	session.Status = sessionStatusOK
-	session.Scene = user.Remark
+	session.Scene = user.Nickname
 	session.OpenID = evt.FromUserName
 	loginSessions.Store(scene, session)
 	return nil
@@ -255,19 +252,19 @@ func normalizeScene(eventKey string) string {
 	return strings.TrimPrefix(eventKey, "qrscene_")
 }
 
-func fetchSubscribeInfo(openID string) (*subscribeResponse, error) {
+func fetchSubscribeInfo(openID string) (*UserResponse, error) {
 	token, err := getGlobalAccessToken()
 	if err != nil {
 		return nil, err
 	}
 
 	infoURL := fmt.Sprintf(
-		"https://api.weixin.qq.com/cgi-bin/user/info?access_token=%s&openid=%s&lang=zh_CN",
+		"https://api.weixin.qq.com/sns/userinfo?access_token=%s&openid=%s&lang=zh_CN",
 		url.QueryEscape(token),
 		url.QueryEscape(openID),
 	)
 
-	var resp subscribeResponse
+	var resp UserResponse
 	if err := getJSON(infoURL, &resp); err != nil {
 		return nil, err
 	}
@@ -412,20 +409,13 @@ type qrCodeResponse struct {
 	ErrMsg        string `json:"errmsg"`
 }
 
-type subscribeResponse struct {
-	Subscribe      int    `json:"subscribe"`
-	OpenID         string `json:"openid"`
-	Language       string `json:"language"`
-	SubscribeTime  int64  `json:"subscribe_time"`
-	UnionID        string `json:"unionid"`
-	Remark         string `json:"remark"`
-	GroupID        string `json:"groupid"`
-	TagIDList      []int  `json:"tagid_list"`
-	SubscribeScene string `json:"subscribe_scene"`
-	QrScene        string `json:"qr_scene"`
-	QrSceneStr     string `json:"qr_scene_str"`
-	ErrCode        int    `json:"errcode"`
-	ErrMsg         string `json:"errmsg"`
+type UserResponse struct {
+	OpenID     string `json:"openid"`
+	Nickname   string `json:"nickname"`
+	Sex        string `json:"sex"`
+	HeadImgUrl string `json:"headimgurl"`
+	ErrCode    int    `json:"errcode"`
+	ErrMsg     string `json:"errmsg"`
 }
 
 type globalTokenResponse struct {
