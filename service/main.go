@@ -31,9 +31,9 @@ const (
 )
 
 var (
-	appID         = os.Getenv("WECHAT_SERVICE_APP_ID")
-	appSecret     = os.Getenv("WECHAT_SERVICE_APP_SECRET")
-	token         = os.Getenv("WECHAT_SERVICE_TOKEN")
+	appID         = os.Getenv("WECHAT_APP_ID")
+	appSecret     = os.Getenv("WECHAT_APP_SECRET")
+	token         = os.Getenv("WECHAT_TOKEN")
 	listenAddr    = ":" + envOrDefault("PORT", "8080")
 	httpClient    = &http.Client{Timeout: 10 * time.Second}
 	errMissingEnv = errors.New("请设置 WECHAT_SERVICE_APP_ID、WECHAT_SERVICE_APP_SECRET 与 WECHAT_SERVICE_TOKEN 环境变量")
