@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/sha1"
+	"embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
@@ -41,6 +43,9 @@ var (
 	globalTokenExpires time.Time
 
 	loginSessions sync.Map // map[string]*loginSession
+
+	//go:embed static
+	staticFiles embed.FS
 )
 
 type loginSession struct {
@@ -48,7 +53,6 @@ type loginSession struct {
 	QRCodeURL string    `json:"qrcode_url"`
 	Status    string    `json:"status"`
 	OpenID    string    `json:"openid,omitempty"`
-	Nickname  string    `json:"nickname,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
@@ -58,7 +62,7 @@ func main() {
 		log.Fatal(errMissingEnv)
 	}
 
-	http.HandleFunc("/", handleIndex)
+	http.Handle("/", http.FileServer(mustStatic()))
 	http.HandleFunc("/session/new", handleCreateSession)
 	http.HandleFunc("/session/", handleSessionStatus)
 	http.HandleFunc("/wechat/message", handleMessage)
@@ -69,11 +73,6 @@ func main() {
 	if err := http.ListenAndServe(listenAddr, nil); err != nil {
 		log.Fatalf("服务器启动失败: %v", err)
 	}
-}
-
-func handleIndex(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	fmt.Fprintf(w, "调用 /session/new 获取二维码信息，轮询 /session/{scene} 查看关注状态。微信服务器回调地址请配置为 /wechat/message。")
 }
 
 func handleCreateSession(w http.ResponseWriter, r *http.Request) {
@@ -243,8 +242,8 @@ func processEvent(evt *wechatEvent) error {
 	}
 
 	session.Status = sessionStatusOK
+	session.Scene = user.Remark
 	session.OpenID = evt.FromUserName
-	session.Nickname = user.Nickname
 	loginSessions.Store(scene, session)
 	return nil
 }
@@ -386,6 +385,14 @@ func cleanupExpiredSessions() {
 	}
 }
 
+func mustStatic() http.FileSystem {
+	sub, err := fs.Sub(staticFiles, "static")
+	if err != nil {
+		panic(err)
+	}
+	return http.FS(sub)
+}
+
 type wechatEvent struct {
 	XMLName      xml.Name `xml:"xml"`
 	ToUserName   string   `xml:"ToUserName"`
@@ -406,17 +413,19 @@ type qrCodeResponse struct {
 }
 
 type subscribeResponse struct {
-	Subscribe int    `json:"subscribe"`
-	OpenID    string `json:"openid"`
-	Nickname  string `json:"nickname"`
-	Sex       int    `json:"sex"`
-	City      string `json:"city"`
-	Country   string `json:"country"`
-	Province  string `json:"province"`
-	Language  string `json:"language"`
-	HeadImg   string `json:"headimgurl"`
-	ErrCode   int    `json:"errcode"`
-	ErrMsg    string `json:"errmsg"`
+	Subscribe      int    `json:"subscribe"`
+	OpenID         string `json:"openid"`
+	Language       string `json:"language"`
+	SubscribeTime  int64  `json:"subscribe_time"`
+	UnionID        string `json:"unionid"`
+	Remark         string `json:"remark"`
+	GroupID        string `json:"groupid"`
+	TagIDList      []int  `json:"tagid_list"`
+	SubscribeScene string `json:"subscribe_scene"`
+	QrScene        string `json:"qr_scene"`
+	QrSceneStr     string `json:"qr_scene_str"`
+	ErrCode        int    `json:"errcode"`
+	ErrMsg         string `json:"errmsg"`
 }
 
 type globalTokenResponse struct {

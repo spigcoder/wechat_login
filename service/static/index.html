@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>服务号扫码关注登录示例</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root {
+        color-scheme: light dark;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      }
+      body {
+        margin: 0;
+        padding: 0;
+        display: flex;
+        min-height: 100vh;
+        align-items: center;
+        justify-content: center;
+        background: #111927;
+        color: #e2e8f0;
+      }
+      .card {
+        width: min(420px, 90vw);
+        background: rgba(15, 23, 42, 0.85);
+        border-radius: 16px;
+        border: 1px solid rgba(148, 163, 184, 0.3);
+        padding: 32px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 1.5rem;
+        text-align: center;
+      }
+      p {
+        margin: 0 0 20px;
+        text-align: center;
+        color: #94a3b8;
+      }
+      .qr-box {
+        width: 240px;
+        height: 240px;
+        margin: 0 auto 16px;
+        border-radius: 12px;
+        border: 1px dashed rgba(148, 163, 184, 0.5);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(15, 23, 42, 0.6);
+        overflow: hidden;
+      }
+      .qr-box img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+      }
+      .status {
+        text-align: center;
+        font-size: 0.95rem;
+        margin-bottom: 20px;
+        min-height: 24px;
+      }
+      .actions {
+        display: flex;
+        justify-content: center;
+        gap: 12px;
+      }
+      button {
+        background: #22d3ee;
+        color: #0f172a;
+        border: none;
+        border-radius: 999px;
+        padding: 10px 20px;
+        font-size: 0.95rem;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: transparent;
+        color: #94a3b8;
+        border: 1px solid rgba(148, 163, 184, 0.4);
+      }
+      .success {
+        color: #4ade80;
+      }
+      .error {
+        color: #f87171;
+      }
+      .login-result {
+        margin-top: 16px;
+        text-align: center;
+        font-size: 0.9rem;
+        color: #94a3b8;
+      }
+      code {
+        background: rgba(15, 23, 42, 0.8);
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>服务号扫码关注登录</h1>
+      <p>请使用微信「扫一扫」扫描二维码，关注成功后此页面会自动刷新登录状态。</p>
+      <div class="qr-box">
+        <img id="qr" alt="加载中..." />
+      </div>
+      <div id="status" class="status">正在生成二维码...</div>
+      <div class="actions">
+        <button id="refresh">刷新二维码</button>
+        <button id="reset" class="secondary">重置状态</button>
+      </div>
+      <div id="result" class="login-result"></div>
+    </div>
+    <script>
+      const statusEl = document.getElementById("status");
+      const qrEl = document.getElementById("qr");
+      const resultEl = document.getElementById("result");
+      const refreshBtn = document.getElementById("refresh");
+      const resetBtn = document.getElementById("reset");
+
+      let pollingTimer = null;
+      let currentScene = "";
+
+      async function createSession() {
+        updateStatus("正在生成二维码...", "");
+        resultEl.textContent = "";
+        try {
+          const resp = await fetch("/session/new", { method: "POST" });
+          if (!resp.ok) {
+            throw new Error(`创建会话失败：HTTP ${resp.status}`);
+          }
+          const data = await resp.json();
+          currentScene = data.scene;
+          qrEl.src = data.qrcode_url;
+          updateStatus("请使用微信扫描二维码并关注服务号。", "");
+          startPolling();
+        } catch (err) {
+          console.error(err);
+          updateStatus("二维码生成失败，请重试。", "error");
+        }
+      }
+
+      async function pollStatus() {
+        if (!currentScene) {
+          return;
+        }
+        try {
+          const resp = await fetch(`/session/${encodeURIComponent(currentScene)}`);
+          if (resp.status === 404) {
+            throw new Error("二维码已过期，请刷新");
+          }
+          const data = await resp.json();
+          if (data.status === "subscribed") {
+            updateStatus("登录成功！", "success");
+            resultEl.innerHTML = `当前登录用户：<code>${data.nickname || data.openid}</code>`;
+            stopPolling();
+          }
+        } catch (err) {
+          console.error(err);
+          updateStatus(err.message || "轮询失败，请刷新二维码。", "error");
+          stopPolling();
+        }
+      }
+
+      function startPolling() {
+        stopPolling();
+        pollingTimer = setInterval(pollStatus, 2000);
+      }
+
+      function stopPolling() {
+        if (pollingTimer) {
+          clearInterval(pollingTimer);
+          pollingTimer = null;
+        }
+      }
+
+      function updateStatus(text, type) {
+        statusEl.textContent = text;
+        statusEl.className = `status ${type || ""}`;
+      }
+
+      refreshBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        stopPolling();
+        createSession();
+      });
+
+      resetBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        stopPolling();
+        currentScene = "";
+        qrEl.removeAttribute("src");
+        updateStatus("状态已重置。", "");
+        resultEl.textContent = "";
+      });
+
+      createSession();
+    </script>
+  </body>
+</html>

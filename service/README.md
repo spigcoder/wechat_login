@@ -24,6 +24,8 @@ export PORT=8080 # 可选
 GOCACHE=$(pwd)/.cache go run ./service
 ```
 
+浏览器访问 `http://localhost:8080/` 即可打开示例前端页面，生成二维码并实时显示登录状态。
+
 ## 可用接口
 
 | 方法 | 路径 | 说明 |
@@ -38,6 +40,7 @@ GOCACHE=$(pwd)/.cache go run ./service
 - 服务端内存缓存 `access_token` 并自动刷新，同时会定期清理过期会话。
 - `wechat/message` 仅处理 `subscribe` / `SCAN` 事件，其它事件会被忽略，回调响应固定 `success`。
 - 登录成功后 `GET /session/{scene}` 会返回 `openid`、`nickname`，可据此建立站点自身会话。
+- 根路由由内嵌静态页面提供展示 UI，若需接入自有前端，可直接复用 `/session` 与 `/wechat/message` 接口。
 
 参考文档：
 - [生成带参数二维码](https://developers.weixin.qq.com/doc/offiaccount/Account_Management/Generating_a_Parametric_QR_Code.html)
