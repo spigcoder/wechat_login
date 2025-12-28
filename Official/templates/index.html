@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>微信公众号扫码登录 Demo</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; margin-top: 50px; }
+        .qr-container { border: 1px solid #ddd; padding: 20px; border-radius: 8px; text-align: center; }
+        #qr-img { width: 200px; height: 200px; display: block; background-color: #f0f0f0; margin-bottom: 10px;}
+        #status { font-weight: bold; color: #666; }
+        .success { color: green !important; }
+    </style>
+</head>
+<body>
+
+<div class="qr-container" id="login-box">
+    <h3>微信扫码登录</h3>
+    <img id="qr-img" src="" alt="二维码加载中..." />
+    <p id="status">正在获取二维码...</p>
+</div>
+
+<div id="success-box" style="display: none; text-align: center;">
+    <h1 class="success">登录成功！</h1>
+    <p>您的 OpenID: <span id="user-openid"></span></p>
+</div>
+
+<script>
+    let sceneStr = "";
+    let pollInterval = null;
+
+    // 1. 页面加载时获取二维码
+    async function getQRCode() {
+        try {
+            const res = await fetch("/login/qrcode");
+            const data = await res.json();
+
+            if (data.url) {
+                // 微信返回的 ticket 需要拼接到 mp.weixin.qq.com 才能变成图片
+                const qrUrl = `https://mp.weixin.qq.com/cgi-bin/showqrcode?ticket=${encodeURIComponent(data.ticket)}`;
+                document.getElementById("qr-img").src = qrUrl;
+
+                sceneStr = data.scene_str;
+                document.getElementById("status").innerText = "请使用微信扫一扫";
+
+                // 开始轮询
+                startPolling();
+            }
+        } catch (e) {
+            console.error(e);
+            document.getElementById("status").innerText = "获取二维码失败";
+        }
+    }
+
+    // 2. 轮询后端接口查询状态
+    function startPolling() {
+        pollInterval = setInterval(async () => {
+            if (!sceneStr) return;
+
+            try {
+                const res = await fetch(`/login/check?scene_str=${sceneStr}`);
+                const data = await res.json();
+
+                if (data.status === "ok") {
+                    // 登录成功
+                    clearInterval(pollInterval); // 停止轮询
+                    showSuccess(data);
+                }
+            } catch (e) {
+                console.error("轮询出错", e);
+            }
+        }, 2000); // 每2秒查一次
+    }
+
+    function showSuccess(data) {
+        document.getElementById("login-box").style.display = "none";
+        document.getElementById("success-box").style.display = "block";
+        document.getElementById("user-openid").innerText = data.openid;
+        alert("登录成功，Token: " + data.token);
+    }
+
+    // 初始化
+    getQRCode();
+</script>
+</body>
+</html>

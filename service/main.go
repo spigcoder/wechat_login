@@ -36,7 +36,7 @@ var (
 	token         = os.Getenv("WECHAT_TOKEN")
 	listenAddr    = ":" + envOrDefault("PORT", "8080")
 	httpClient    = &http.Client{Timeout: 10 * time.Second}
-	errMissingEnv = errors.New("请设置 WECHAT_APP_ID、WECHAT_APP_SECRET 与 WECHAT_TOKEN 环境变量")
+	errMissingEnv = errors.New("请设置 WECHAT_APP_ID、WECHAT_APP_SECRET 与 WECHAT_x xE_TOKEN 环境变量")
 
 	globalTokenMu      sync.RWMutex
 	globalToken        string
