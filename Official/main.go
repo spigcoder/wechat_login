@@ -26,10 +26,9 @@ func initWechat() {
 	// 使用内存缓存，生产环境请用 Redis
 	memory := cache.NewMemory()
 	cfg := &offConfig.Config{
-		AppID:          "你的AppID",
-		AppSecret:      "你的AppSecret",
-		Token:          "mytoken123",
-		EncodingAESKey: "你的EncodingAESKey",
+		AppID:          "wxd3823528b4f98b5a",
+		AppSecret:      "38f7b4f10c0aca5f339c739bb54d5e41",
+		Token:          "abcdefg",
 		Cache:          memory,
 	}
 	oa = wc.GetOfficialAccount(cfg)
@@ -81,7 +80,7 @@ func main() {
 	})
 
 	// 2. 核心：微信服务器回调接口
-	r.Any("/wx/callback", func(c *gin.Context) {
+	r.Any("/wechat/message", func(c *gin.Context) {
 		server := oa.GetServer(c.Request, c.Writer)
 
 		// 设置消息处理逻辑
